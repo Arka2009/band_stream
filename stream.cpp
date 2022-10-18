@@ -45,7 +45,17 @@
 # include <math.h>
 # include <float.h>
 # include <limits.h>
+# include <stdint.h>
+# include <stdlib.h>
 # include <sys/time.h>
+
+#ifdef GEM5_RV64
+#include "gem5/m5ops.h"
+#elif (__amd64__) && (USE_PCM)
+#include "roi_hooks.h"
+#include "cpu_uarch.h"
+#include "errordefs.h"
+#endif
 
 /*-----------------------------------------------------------------------
  * INSTRUCTIONS:
@@ -176,54 +186,139 @@
 #define STREAM_TYPE double
 #endif
 
-static STREAM_TYPE	a[STREAM_ARRAY_SIZE+OFFSET],
-			b[STREAM_ARRAY_SIZE+OFFSET],
-			c[STREAM_ARRAY_SIZE+OFFSET];
+void checkSTREAMresults(STREAM_TYPE *a, \
+                        STREAM_TYPE *b, \
+						STREAM_TYPE *c, \
+						unsigned num_element);
 
-static double	avgtime[4] = {0}, maxtime[4] = {0},
-		mintime[4] = {FLT_MAX,FLT_MAX,FLT_MAX,FLT_MAX};
+/* Initial arrays */
+void initializeArrays(STREAM_TYPE *arr_ptr, uint32_t num_elements) {
+	for (uint32_t i = 0; i < num_elements; i++) {
+		arr_ptr[i] = ((STREAM_TYPE)rand()/RAND_MAX)*2.0-1.0;
+	}
+}
 
-static char	*label[4] = {"Copy:      ", "Scale:     ",
-    "Add:       ", "Triad:     "};
+class ROICounter {
+	private	:
+		int32_t lproc_id;
+		#if (__amd64__) && (USE_PCM)
+		core_counter_state_ptr_t counter_state;
+		#else
+		uint64_t tsc;
+		uint64_t instret;
+		uint64_t cpu_cycles;
+		uint64_t l1d_miss;
+		uint64_t l1d_hits;
+		uint64_t l2_miss;
+		uint64_t l2_hits;
+		uint64_t l3_miss;
+		uint64_t l3_hits;
+		#endif
+	public :
+		ROICounter(int32_t lproc_id) :
+			lproc_id(lproc_id),
+			tsc(0),
+			instret(0),
+			cpu_cycles(0),
+			l1d_hits(0),
+			l1d_miss(0),
+			l2_hits(0),
+			l2_miss(0),
+			l3_hits(0),
+			l3_miss(0) {}
+		void mark_roi();
+		void start_roi();
+		void stop_roi();
+		ROICounter & operator - (const ROICounter & o);
+};
 
-static double	bytes[4] = {
-    2 * sizeof(STREAM_TYPE) * STREAM_ARRAY_SIZE,
-    2 * sizeof(STREAM_TYPE) * STREAM_ARRAY_SIZE,
-    3 * sizeof(STREAM_TYPE) * STREAM_ARRAY_SIZE,
-    3 * sizeof(STREAM_TYPE) * STREAM_ARRAY_SIZE
-    };
+ROICounter & ROICounter::operator - (const ROICounter & o) {
+	#if (__amd64__) && (USE_PCM)
+	struct __eco_roi_stats_struct  tmp = __eco_counter_diff(stop, start);
+	tsc = tmp.tsc;
+	instret = tmp.instret;
+	cpu_cycles = tmp.cpu_cycles;
+	l1d_miss = tmp.l1d_miss;
+	l1d_hits = tmp.l1d_hits;
+	l2_miss = tmp.l2_miss;
+	l2_hits = tmp.l2_hits;
+	l3_miss = tmp.l3_miss;
+	l3_hits = tmp.l3_hits;
+	#else
+	tsc = this->tsc - o.tsc;
+	instret = 0;
+	cpu_cycles = 0;
+	l1d_miss = 0;
+	l1d_hits = 0;
+	l2_miss = 0;
+	l2_hits = 0;
+	l3_miss = 0;
+	l3_hits = 0;
+	#endif
+}
 
-extern double mysecond();
-extern void checkSTREAMresults();
-#ifdef TUNED
-extern void tuned_STREAM_Copy();
-extern void tuned_STREAM_Scale(STREAM_TYPE scalar);
-extern void tuned_STREAM_Add();
-extern void tuned_STREAM_Triad(STREAM_TYPE scalar);
-#endif
-#ifdef _OPENMP
-extern int omp_get_num_threads();
-#endif
-int
-main()
-    {
-    int			quantum, checktick();
-    int			BytesPerWord;
+void ROICounter::mark_roi() {
+	#if (__amd64__) && (USE_PCM)
+   	counter_state = __eco_roi_begin(lproc_id);
+   	#elif GEM5_RV64
+	tsc = -1;
+	#else
+	tsc = __eco_rdtsc();
+	#endif
+	instret = -1;
+	cpu_cycles = -1;
+	l1d_miss = -1;
+	l1d_hits = -1;
+	l2_miss = -1;
+	l2_hits = -1;
+	l3_miss = -1;
+	l3_hits = -1;
+}
+
+void ROICounter::start_roi() {
+	#ifdef GEM5_RV64
+	m5_reset_stats(0,0);
+	#endif
+	mark_roi();
+}
+
+
+void ROICounter::stop_roi() {
+	#ifdef GEM5_RV64
+	 m5_dump_stats(0,0);
+	#endif
+	mark_roi();
+}
+
+int main(int argc, char* argv[]) {
+    int			bytesPerWord;
     int			k;
     ssize_t		j;
     STREAM_TYPE		scalar;
     double		t, times[4][NTIMES];
 
-    /* --- SETUP --- determine precision and check timing --- */
+	/* --- SETUP --- */
+    fprintf(stderr,HLINE);
+    fprintf(stderr,"STREAM version $Revision: 5.10 $\n");
+    fprintf(stderr,HLINE);
+    bytesPerWord = sizeof(STREAM_TYPE);
+    fprintf(stderr,"This system uses %d bytes per array element.\n",
+	bytesPerWord);
+    fprintf(stderr,HLINE);
+	if (argc != 4) {
+      fprintf(stderr, "argc=%d\n", argc);
+      fprintf(stderr, "");
+      return 1;
+   	}
+	uint32_t num_elements = atoi(argv[1]);
 
-    printf(HLINE);
-    printf("STREAM version $Revision: 5.10 $\n");
-    printf(HLINE);
-    BytesPerWord = sizeof(STREAM_TYPE);
-    printf("This system uses %d bytes per array element.\n",
-	BytesPerWord);
+	/* --- Affine CPUs --- */
+	int32_t lproc_id = 0; // Logical processor ID for this thread
+	#if (__amd64__) && (USE_PCM)
+	affinity_set_cpu2(lproc_id);
+	__eco_init(lproc_id);
+	#endif
 
-    printf(HLINE);
 #ifdef N
     printf("*****  WARNING: ******\n");
     printf("      It appears that you set the preprocessor variable N when compiling this code.\n");
@@ -232,147 +327,53 @@ main()
     printf("*****  WARNING: ******\n");
 #endif
 
-    printf("Array size = %llu (elements), Offset = %d (elements)\n" , (unsigned long long) STREAM_ARRAY_SIZE, OFFSET);
-    printf("Memory per array = %.1f MiB (= %.1f GiB).\n", 
-	BytesPerWord * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024.0),
-	BytesPerWord * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024.0/1024.0));
-    printf("Total memory required = %.1f MiB (= %.1f GiB).\n",
-	(3.0 * BytesPerWord) * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024.),
-	(3.0 * BytesPerWord) * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024./1024.));
-    printf("Each kernel will be executed %d times.\n", NTIMES);
-    printf(" The *best* time for each kernel (excluding the first iteration)\n"); 
-    printf(" will be used to compute the reported bandwidth.\n");
-
-#ifdef _OPENMP
-    printf(HLINE);
-#pragma omp parallel 
-    {
-#pragma omp master
-	{
-	    k = omp_get_num_threads();
-	    printf ("Number of Threads requested = %i\n",k);
-        }
-    }
-#endif
-
-#ifdef _OPENMP
-	k = 0;
-#pragma omp parallel
-#pragma omp atomic 
-		k++;
-    printf ("Number of Threads counted = %i\n",k);
-#endif
+    fprintf(stderr,"Array size = %llu (elements), Offset = %d (elements)\n" , (unsigned long long) STREAM_ARRAY_SIZE, OFFSET);
+    fprintf(stderr,"Memory per array = %.1f MiB (= %.1f GiB).\n", 
+	bytesPerWord * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024.0),
+	bytesPerWord * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024.0/1024.0));
+    fprintf(stderr,"Total memory required = %.1f MiB (= %.1f GiB).\n",
+	(3.0 * bytesPerWord) * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024.),
+	(3.0 * bytesPerWord) * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024./1024.));
+    fprintf(stderr,"Each kernel will be executed %d times.\n", NTIMES);
+    fprintf(stderr,"The *best* time for each kernel (excluding the first iteration)\n"); 
+    fprintf(stderr,"will be used to compute the reported bandwidth.\n");
 
     /* Get initial value for system clock. */
-#pragma omp parallel for
-    for (j=0; j<STREAM_ARRAY_SIZE; j++) {
-	    a[j] = 1.0;
-	    b[j] = 2.0;
-	    c[j] = 0.0;
-	}
-
-    printf(HLINE);
-
-    if  ( (quantum = checktick()) >= 1) 
-	printf("Your clock granularity/precision appears to be "
-	    "%d microseconds.\n", quantum);
-    else {
-	printf("Your clock granularity appears to be "
-	    "less than one microsecond.\n");
-	quantum = 1;
-    }
-
-    t = mysecond();
-#pragma omp parallel for
-    for (j = 0; j < STREAM_ARRAY_SIZE; j++)
-		a[j] = 2.0E0 * a[j];
-    t = 1.0E6 * (mysecond() - t);
-
-    printf("Each test below will take on the order"
-	" of %d microseconds.\n", (int) t  );
-    printf("   (= %d clock ticks)\n", (int) (t/quantum) );
-    printf("Increase the size of the arrays if this shows that\n");
-    printf("you are not getting at least 20 clock ticks per test.\n");
-
-    printf(HLINE);
-
-    printf("WARNING -- The above is only a rough guideline.\n");
-    printf("For best results, please be sure you know the\n");
-    printf("precision of your system timer.\n");
-    printf(HLINE);
+	STREAM_TYPE *a   = (STREAM_TYPE *)malloc(num_elements * sizeof(STREAM_TYPE));
+	STREAM_TYPE *b   = (STREAM_TYPE *)malloc(num_elements * sizeof(STREAM_TYPE));
+	STREAM_TYPE *c   = (STREAM_TYPE *)malloc(num_elements * sizeof(STREAM_TYPE));
+	initializeArrays(a, num_elements);
+	initializeArrays(b, num_elements);
+	initializeArrays(c, num_elements);
+    fprintf(stderr, HLINE);
     
     /*	--- MAIN LOOP --- repeat test cases NTIMES times --- */
+    __roi_counters start = __start_roi(lproc_id); // CRITICAL SECTION : START
+	scalar = 3.0;
+    for (k=0; k<NTIMES; k++) {
+		#pragma omp parallel for
+		for (j=0; j<STREAM_ARRAY_SIZE; j++)
+		    c[j] = a[j];
 
-    scalar = 3.0;
-    for (k=0; k<NTIMES; k++)
-	{
-	times[0][k] = mysecond();
-#ifdef TUNED
-        tuned_STREAM_Copy();
-#else
-#pragma omp parallel for
-	for (j=0; j<STREAM_ARRAY_SIZE; j++)
-	    c[j] = a[j];
-#endif
-	times[0][k] = mysecond() - times[0][k];
-	
-	times[1][k] = mysecond();
-#ifdef TUNED
-        tuned_STREAM_Scale(scalar);
-#else
-#pragma omp parallel for
-	for (j=0; j<STREAM_ARRAY_SIZE; j++)
-	    b[j] = scalar*c[j];
-#endif
-	times[1][k] = mysecond() - times[1][k];
-	
-	times[2][k] = mysecond();
-#ifdef TUNED
-        tuned_STREAM_Add();
-#else
-#pragma omp parallel for
-	for (j=0; j<STREAM_ARRAY_SIZE; j++)
-	    c[j] = a[j]+b[j];
-#endif
-	times[2][k] = mysecond() - times[2][k];
-	
-	times[3][k] = mysecond();
-#ifdef TUNED
-        tuned_STREAM_Triad(scalar);
-#else
-#pragma omp parallel for
-	for (j=0; j<STREAM_ARRAY_SIZE; j++)
-	    a[j] = b[j]+scalar*c[j];
-#endif
-	times[3][k] = mysecond() - times[3][k];
+		#pragma omp parallel for
+		for (j=0; j<STREAM_ARRAY_SIZE; j++)
+		    b[j] = scalar*c[j];
+
+		#pragma omp parallel for
+		for (j=0; j<STREAM_ARRAY_SIZE; j++)
+		    c[j] = a[j]+b[j];
+
+		#pragma omp parallel for
+		for (j=0; j<STREAM_ARRAY_SIZE; j++)
+		    a[j] = b[j]+scalar*c[j];
 	}
-
-    /*	--- SUMMARY --- */
-
-    for (k=1; k<NTIMES; k++) /* note -- skip first iteration */
-	{
-	for (j=0; j<4; j++)
-	    {
-	    avgtime[j] = avgtime[j] + times[j][k];
-	    mintime[j] = MIN(mintime[j], times[j][k]);
-	    maxtime[j] = MAX(maxtime[j], times[j][k]);
-	    }
-	}
-    
-    printf("Function    Best Rate MB/s  Avg time     Min time     Max time\n");
-    for (j=0; j<4; j++) {
-		avgtime[j] = avgtime[j]/(double)(NTIMES-1);
-
-		printf("%s%12.1f  %11.6f  %11.6f  %11.6f\n", label[j],
-	       1.0E-06 * bytes[j]/mintime[j],
-	       avgtime[j],
-	       mintime[j],
-	       maxtime[j]);
-    }
-    printf(HLINE);
+	__roi_counters stop = __start_roi(lproc_id); // CRITICAL SECTION : STOP
+   
+	/* --- SUMMARY --- */
+	__roi_counters diff_count = __diff_roi(lproc_id, stop, start);
 
     /* --- Check Results --- */
-    checkSTREAMresults();
+    checkSTREAMresults(a,b,c,num_elements);
     printf(HLINE);
 
     return 0;
@@ -380,58 +381,14 @@ main()
 
 # define	M	20
 
-int
-checktick()
-    {
-    int		i, minDelta, Delta;
-    double	t1, t2, timesfound[M];
-
-/*  Collect a sequence of M unique time values from the system. */
-
-    for (i = 0; i < M; i++) {
-	t1 = mysecond();
-	while( ((t2=mysecond()) - t1) < 1.0E-6 )
-	    ;
-	timesfound[i] = t1 = t2;
-	}
-
-/*
- * Determine the minimum difference between these M values.
- * This result will be our estimate (in microseconds) for the
- * clock granularity.
- */
-
-    minDelta = 1000000;
-    for (i = 1; i < M; i++) {
-	Delta = (int)( 1.0E6 * (timesfound[i]-timesfound[i-1]));
-	minDelta = MIN(minDelta, MAX(Delta,0));
-	}
-
-   return(minDelta);
-    }
-
-
-
-/* A gettimeofday routine to give access to the wall
-   clock timer on most UNIX-like systems.  */
-
-#include <sys/time.h>
-
-double mysecond()
-{
-        struct timeval tp;
-        struct timezone tzp;
-        int i;
-
-        i = gettimeofday(&tp,&tzp);
-        return ( (double) tp.tv_sec + (double) tp.tv_usec * 1.e-6 );
-}
 
 #ifndef abs
 #define abs(a) ((a) >= 0 ? (a) : -(a))
 #endif
-void checkSTREAMresults ()
-{
+void checkSTREAMresults(STREAM_TYPE *a, \
+                        STREAM_TYPE *b, \
+						STREAM_TYPE *c, \
+						unsigned num_elements) {
 	STREAM_TYPE aj,bj,cj,scalar;
 	STREAM_TYPE aSumErr,bSumErr,cSumErr;
 	STREAM_TYPE aAvgErr,bAvgErr,cAvgErr;
@@ -443,17 +400,18 @@ void checkSTREAMresults ()
 	aj = 1.0;
 	bj = 2.0;
 	cj = 0.0;
-    /* a[] is modified during timing check */
+    
+	/* a[] is modified during timing check */
 	aj = 2.0E0 * aj;
-    /* now execute timing loop */
+    
+	/* now execute timing loop */
 	scalar = 3.0;
-	for (k=0; k<NTIMES; k++)
-        {
-            cj = aj;
-            bj = scalar*cj;
-            cj = aj+bj;
-            aj = bj+scalar*cj;
-        }
+	for (k=0; k<NTIMES; k++) {
+        cj = aj;
+        bj = scalar*cj;
+        cj = aj+bj;
+        aj = bj+scalar*cj;
+    }
 
     /* accumulate deltas between observed and expected results */
 	aSumErr = 0.0;
@@ -547,39 +505,3 @@ void checkSTREAMresults ()
 	printf ("    Rel Errors on a, b, c:     %e %e %e \n",abs(aAvgErr/aj),abs(bAvgErr/bj),abs(cAvgErr/cj));
 #endif
 }
-
-#ifdef TUNED
-/* stubs for "tuned" versions of the kernels */
-void tuned_STREAM_Copy()
-{
-	ssize_t j;
-#pragma omp parallel for
-        for (j=0; j<STREAM_ARRAY_SIZE; j++)
-            c[j] = a[j];
-}
-
-void tuned_STREAM_Scale(STREAM_TYPE scalar)
-{
-	ssize_t j;
-#pragma omp parallel for
-	for (j=0; j<STREAM_ARRAY_SIZE; j++)
-	    b[j] = scalar*c[j];
-}
-
-void tuned_STREAM_Add()
-{
-	ssize_t j;
-#pragma omp parallel for
-	for (j=0; j<STREAM_ARRAY_SIZE; j++)
-	    c[j] = a[j]+b[j];
-}
-
-void tuned_STREAM_Triad(STREAM_TYPE scalar)
-{
-	ssize_t j;
-#pragma omp parallel for
-	for (j=0; j<STREAM_ARRAY_SIZE; j++)
-	    a[j] = b[j]+scalar*c[j];
-}
-/* end of stubs for the "tuned" versions of the kernels */
-#endif
