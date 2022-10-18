@@ -1,4 +1,4 @@
-SOURCES:=stream.c
+SOURCES:=stream.cpp
 
 TARGET_GEM5_RV64=stream.GEM5_RV64
 TARGET_AARCH64=stream.AARCH64

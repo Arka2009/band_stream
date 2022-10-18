@@ -201,9 +201,6 @@ void initializeArrays(STREAM_TYPE *arr_ptr, uint32_t num_elements) {
 class ROICounter {
 	private	:
 		int32_t lproc_id;
-		#if (__amd64__) && (USE_PCM)
-		core_counter_state_ptr_t counter_state;
-		#else
 		uint64_t tsc;
 		uint64_t instret;
 		uint64_t cpu_cycles;
@@ -213,9 +210,14 @@ class ROICounter {
 		uint64_t l2_hits;
 		uint64_t l3_miss;
 		uint64_t l3_hits;
+		#if (__amd64__) && (USE_PCM)
+		core_counter_state_ptr_t counter_state;
 		#endif
 	public :
 		ROICounter(int32_t lproc_id) :
+			#if (__amd64__) && (USE_PCM)
+			counter_state(NULL),
+			#endif
 			lproc_id(lproc_id),
 			tsc(0),
 			instret(0),
@@ -226,6 +228,7 @@ class ROICounter {
 			l2_miss(0),
 			l3_hits(0),
 			l3_miss(0) {}
+			
 		void mark_roi();
 		void start_roi();
 		void stop_roi();
@@ -234,7 +237,7 @@ class ROICounter {
 
 ROICounter & ROICounter::operator - (const ROICounter & o) {
 	#if (__amd64__) && (USE_PCM)
-	struct __eco_roi_stats_struct  tmp = __eco_counter_diff(stop, start);
+	struct __eco_roi_stats_struct  tmp = __eco_counter_diff(counter_state, o.counter_state);
 	tsc = tmp.tsc;
 	instret = tmp.instret;
 	cpu_cycles = tmp.cpu_cycles;
@@ -260,7 +263,8 @@ ROICounter & ROICounter::operator - (const ROICounter & o) {
 void ROICounter::mark_roi() {
 	#if (__amd64__) && (USE_PCM)
    	counter_state = __eco_roi_begin(lproc_id);
-   	#elif GEM5_RV64
+   	#endif
+	#ifdef GEM5_RV64
 	tsc = -1;
 	#else
 	tsc = __eco_rdtsc();
@@ -348,7 +352,7 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, HLINE);
     
     /*	--- MAIN LOOP --- repeat test cases NTIMES times --- */
-    __roi_counters start = __start_roi(lproc_id); // CRITICAL SECTION : START
+    ROICounter start(lproc_id); // CRITICAL SECTION : START
 	scalar = 3.0;
     for (k=0; k<NTIMES; k++) {
 		#pragma omp parallel for
@@ -367,10 +371,10 @@ int main(int argc, char* argv[]) {
 		for (j=0; j<STREAM_ARRAY_SIZE; j++)
 		    a[j] = b[j]+scalar*c[j];
 	}
-	__roi_counters stop = __start_roi(lproc_id); // CRITICAL SECTION : STOP
+	ROICounter stop(lproc_id); // CRITICAL SECTION : STOP
    
 	/* --- SUMMARY --- */
-	__roi_counters diff_count = __diff_roi(lproc_id, stop, start);
+	ROICounter diff_count = stop-start;
 
     /* --- Check Results --- */
     checkSTREAMresults(a,b,c,num_elements);
