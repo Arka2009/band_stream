@@ -51,7 +51,7 @@
 
 #ifdef GEM5_RV64
 #include "gem5/m5ops.h"
-#elif (__amd64__) && (USE_PCM)
+#else
 #include "roi_hooks.h"
 #include "cpu_uarch.h"
 #include "errordefs.h"
@@ -198,100 +198,30 @@ void initializeArrays(STREAM_TYPE *arr_ptr, uint32_t num_elements) {
 	}
 }
 
-class ROICounter {
-	private	:
-		int32_t lproc_id;
-		uint64_t tsc;
-		uint64_t instret;
-		uint64_t cpu_cycles;
-		uint64_t l1d_miss;
-		uint64_t l1d_hits;
-		uint64_t l2_miss;
-		uint64_t l2_hits;
-		uint64_t l3_miss;
-		uint64_t l3_hits;
-		#if (__amd64__) && (USE_PCM)
-		core_counter_state_ptr_t counter_state;
-		#endif
-	public :
-		ROICounter(int32_t lproc_id) :
-			#if (__amd64__) && (USE_PCM)
-			counter_state(NULL),
+
+__attribute__((noinline))
+STREAM_TYPE stream_compute_roi(STREAM_TYPE *a,\
+                        STREAM_TYPE *b,\ 
+						STREAM_TYPE *c, \
+						STREAM_TYPE scalar) {
+	unsigned k, j;
+	STREAM_TYPE ret = 0.0;
+	for (k=0; k<NTIMES; k++) {
+		for (j=0; j<STREAM_ARRAY_SIZE; j++) {
+			#if BENCH_CLASS == 0
+			ret += a[j];
+			#elif BENCH_CLASS == 1
+		    c[j] = a[j];
+			#elif BENCH_CLASS == 1
+		    b[j] = scalar*c[j];
+			#elif BENCH_CLASS == 2
+		    c[j] = a[j]+b[j];
+			#else
+		    a[j] = b[j]+scalar*c[j];
 			#endif
-			lproc_id(lproc_id),
-			tsc(0),
-			instret(0),
-			cpu_cycles(0),
-			l1d_hits(0),
-			l1d_miss(0),
-			l2_hits(0),
-			l2_miss(0),
-			l3_hits(0),
-			l3_miss(0) {}
-			
-		void mark_roi();
-		void start_roi();
-		void stop_roi();
-		ROICounter & operator - (const ROICounter & o);
-};
-
-ROICounter & ROICounter::operator - (const ROICounter & o) {
-	#if (__amd64__) && (USE_PCM)
-	struct __eco_roi_stats_struct  tmp = __eco_counter_diff(counter_state, o.counter_state);
-	tsc = tmp.tsc;
-	instret = tmp.instret;
-	cpu_cycles = tmp.cpu_cycles;
-	l1d_miss = tmp.l1d_miss;
-	l1d_hits = tmp.l1d_hits;
-	l2_miss = tmp.l2_miss;
-	l2_hits = tmp.l2_hits;
-	l3_miss = tmp.l3_miss;
-	l3_hits = tmp.l3_hits;
-	#else
-	tsc = this->tsc - o.tsc;
-	instret = 0;
-	cpu_cycles = 0;
-	l1d_miss = 0;
-	l1d_hits = 0;
-	l2_miss = 0;
-	l2_hits = 0;
-	l3_miss = 0;
-	l3_hits = 0;
-	#endif
-}
-
-void ROICounter::mark_roi() {
-	#if (__amd64__) && (USE_PCM)
-   	counter_state = __eco_roi_begin(lproc_id);
-   	#endif
-	#ifdef GEM5_RV64
-	tsc = -1;
-	#else
-	tsc = __eco_rdtsc();
-	#endif
-	instret = -1;
-	cpu_cycles = -1;
-	l1d_miss = -1;
-	l1d_hits = -1;
-	l2_miss = -1;
-	l2_hits = -1;
-	l3_miss = -1;
-	l3_hits = -1;
-}
-
-void ROICounter::start_roi() {
-	#ifdef GEM5_RV64
-	m5_reset_stats(0,0);
-	#endif
-	mark_roi();
-}
-
-
-void ROICounter::stop_roi() {
-	#ifdef GEM5_RV64
-	 m5_dump_stats(0,0);
-	#endif
-	mark_roi();
+		}
+	}
+	return ret;
 }
 
 int main(int argc, char* argv[]) {
@@ -299,7 +229,6 @@ int main(int argc, char* argv[]) {
     int			k;
     ssize_t		j;
     STREAM_TYPE		scalar;
-    double		t, times[4][NTIMES];
 
 	/* --- SETUP --- */
     fprintf(stderr,HLINE);
@@ -316,12 +245,6 @@ int main(int argc, char* argv[]) {
    	}
 	uint32_t num_elements = atoi(argv[1]);
 
-	/* --- Affine CPUs --- */
-	int32_t lproc_id = 0; // Logical processor ID for this thread
-	#if (__amd64__) && (USE_PCM)
-	affinity_set_cpu2(lproc_id);
-	__eco_init(lproc_id);
-	#endif
 
 #ifdef N
     printf("*****  WARNING: ******\n");
@@ -350,42 +273,37 @@ int main(int argc, char* argv[]) {
 	initializeArrays(b, num_elements);
 	initializeArrays(c, num_elements);
     fprintf(stderr, HLINE);
-    
-    /*	--- MAIN LOOP --- repeat test cases NTIMES times --- */
-    ROICounter start(lproc_id); // CRITICAL SECTION : START
 	scalar = 3.0;
-    for (k=0; k<NTIMES; k++) {
-		#pragma omp parallel for
-		for (j=0; j<STREAM_ARRAY_SIZE; j++)
-		    c[j] = a[j];
+    
+    /*	--- ROI --- repeat test cases NTIMES times --- */
+	#ifdef GEM5_RV64
+	m5_reset_stats(0,0);
+	#else
+	uint64_t start = __eco_rdtsc(); // CRITICAL SECTION : START
+	#endif
+	
+	volatile STREAM_TYPE ret = stream_compute_roi(a, b, c, scalar);
 
-		#pragma omp parallel for
-		for (j=0; j<STREAM_ARRAY_SIZE; j++)
-		    b[j] = scalar*c[j];
-
-		#pragma omp parallel for
-		for (j=0; j<STREAM_ARRAY_SIZE; j++)
-		    c[j] = a[j]+b[j];
-
-		#pragma omp parallel for
-		for (j=0; j<STREAM_ARRAY_SIZE; j++)
-		    a[j] = b[j]+scalar*c[j];
-	}
-	ROICounter stop(lproc_id); // CRITICAL SECTION : STOP
+	#if GEM5_RV64
+    m5_dump_stats(0,0);
+	#else
+	uint64_t stop = __eco_rdtsc(); // CRITICAL SECTION : STOP
+    #endif
    
 	/* --- SUMMARY --- */
-	ROICounter diff_count = stop-start;
+	#ifndef GEM5_RV64
+	uint64_t diff_count = stop-start;
+	#endif
 
     /* --- Check Results --- */
     checkSTREAMresults(a,b,c,num_elements);
     printf(HLINE);
+	printf("Returning ret %f\n",ret);
 
     return 0;
 }
 
 # define	M	20
-
-
 #ifndef abs
 #define abs(a) ((a) >= 0 ? (a) : -(a))
 #endif
