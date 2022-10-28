@@ -201,13 +201,14 @@ void initializeArrays(STREAM_TYPE *arr_ptr, uint32_t num_elements) {
 
 __attribute__((noinline))
 STREAM_TYPE stream_compute_roi(STREAM_TYPE *a,\
-                        STREAM_TYPE *b,\ 
-						STREAM_TYPE *c, \
-						STREAM_TYPE scalar) {
+                               STREAM_TYPE *b,\ 
+						       STREAM_TYPE *c, \
+						       STREAM_TYPE scalar, \
+							   unsigned lo, unsigned hi) {
 	unsigned k, j;
 	STREAM_TYPE ret = 0.0;
 	for (k=0; k<NTIMES; k++) {
-		for (j=0; j<STREAM_ARRAY_SIZE; j++) {
+		for (j=lo; j<hi; j++) {
 			#if BENCH_CLASS == 0
 			ret += a[j];
 			#elif BENCH_CLASS == 1
@@ -238,12 +239,12 @@ int main(int argc, char* argv[]) {
     fprintf(stderr,"This system uses %d bytes per array element.\n",
 	bytesPerWord);
     fprintf(stderr,HLINE);
-	if (argc != 4) {
-      fprintf(stderr, "argc=%d\n", argc);
-      fprintf(stderr, "");
+	if (argc != 3) {
+      fprintf(stderr, "\n[Usage]-%d: exe <proc_id> <num_procs>\n",argc);
       return 1;
    	}
-	uint32_t num_elements = atoi(argv[1]);
+	unsigned proc_id = atoi(argv[1]);
+	unsigned num_procs = atoi(argv[2]);
 
 
 #ifdef N
@@ -266,15 +267,19 @@ int main(int argc, char* argv[]) {
     fprintf(stderr,"will be used to compute the reported bandwidth.\n");
 
     /* Get initial value for system clock. */
-	STREAM_TYPE *a   = (STREAM_TYPE *)malloc(num_elements * sizeof(STREAM_TYPE));
-	STREAM_TYPE *b   = (STREAM_TYPE *)malloc(num_elements * sizeof(STREAM_TYPE));
-	STREAM_TYPE *c   = (STREAM_TYPE *)malloc(num_elements * sizeof(STREAM_TYPE));
-	initializeArrays(a, num_elements);
-	initializeArrays(b, num_elements);
-	initializeArrays(c, num_elements);
+	STREAM_TYPE *a   = (STREAM_TYPE *)malloc(STREAM_ARRAY_SIZE * sizeof(STREAM_TYPE));
+	STREAM_TYPE *b   = (STREAM_TYPE *)malloc(STREAM_ARRAY_SIZE * sizeof(STREAM_TYPE));
+	STREAM_TYPE *c   = (STREAM_TYPE *)malloc(STREAM_ARRAY_SIZE * sizeof(STREAM_TYPE));
+	initializeArrays(a, STREAM_ARRAY_SIZE);
+	initializeArrays(b, STREAM_ARRAY_SIZE);
+	initializeArrays(c, STREAM_ARRAY_SIZE);
     fprintf(stderr, HLINE);
 	scalar = 3.0;
     
+	unsigned num_elements_per_proc = (STREAM_ARRAY_SIZE/num_procs);
+	unsigned lo = proc_id*num_elements_per_proc;
+	unsigned hi = (proc_id+1)*(num_elements_per_proc);
+	
     /*	--- ROI --- repeat test cases NTIMES times --- */
 	#ifdef GEM5_RV64
 	m5_reset_stats(0,0);
@@ -282,7 +287,7 @@ int main(int argc, char* argv[]) {
 	uint64_t start = __eco_rdtsc(); // CRITICAL SECTION : START
 	#endif
 	
-	volatile STREAM_TYPE ret = stream_compute_roi(a, b, c, scalar);
+	volatile STREAM_TYPE ret = stream_compute_roi(a, b, c, scalar, lo, hi);
 
 	#if GEM5_RV64
     m5_dump_stats(0,0);
@@ -296,7 +301,7 @@ int main(int argc, char* argv[]) {
 	#endif
 
     /* --- Check Results --- */
-    checkSTREAMresults(a,b,c,num_elements);
+    checkSTREAMresults(a,b,c,STREAM_ARRAY_SIZE);
     printf(HLINE);
 	printf("Returning ret %f\n",ret);
 
