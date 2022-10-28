@@ -189,12 +189,13 @@
 void checkSTREAMresults(STREAM_TYPE *a, \
                         STREAM_TYPE *b, \
 						STREAM_TYPE *c, \
-						unsigned num_element);
+						unsigned lo, unsigned hi);
 
 /* Initial arrays */
-void initializeArrays(STREAM_TYPE *arr_ptr, uint32_t num_elements) {
+void initializeArrays(STREAM_TYPE *arr_ptr, STREAM_TYPE init_value, uint32_t num_elements) {
 	for (uint32_t i = 0; i < num_elements; i++) {
-		arr_ptr[i] = ((STREAM_TYPE)rand()/RAND_MAX)*2.0-1.0;
+		// arr_ptr[i] = ((STREAM_TYPE)rand()/RAND_MAX)*2.0-1.0;
+		arr_ptr[i] = init_value;
 	}
 }
 
@@ -213,9 +214,9 @@ STREAM_TYPE stream_compute_roi(STREAM_TYPE *a,\
 			ret += a[j];
 			#elif BENCH_CLASS == 1
 		    c[j] = a[j];
-			#elif BENCH_CLASS == 1
-		    b[j] = scalar*c[j];
 			#elif BENCH_CLASS == 2
+		    b[j] = scalar*c[j];
+			#elif BENCH_CLASS == 3
 		    c[j] = a[j]+b[j];
 			#else
 		    a[j] = b[j]+scalar*c[j];
@@ -270,9 +271,9 @@ int main(int argc, char* argv[]) {
 	STREAM_TYPE *a   = (STREAM_TYPE *)malloc(STREAM_ARRAY_SIZE * sizeof(STREAM_TYPE));
 	STREAM_TYPE *b   = (STREAM_TYPE *)malloc(STREAM_ARRAY_SIZE * sizeof(STREAM_TYPE));
 	STREAM_TYPE *c   = (STREAM_TYPE *)malloc(STREAM_ARRAY_SIZE * sizeof(STREAM_TYPE));
-	initializeArrays(a, STREAM_ARRAY_SIZE);
-	initializeArrays(b, STREAM_ARRAY_SIZE);
-	initializeArrays(c, STREAM_ARRAY_SIZE);
+	initializeArrays(a, 1.0, STREAM_ARRAY_SIZE);
+	initializeArrays(b, 2.0, STREAM_ARRAY_SIZE);
+	initializeArrays(c, 0.0, STREAM_ARRAY_SIZE);
     fprintf(stderr, HLINE);
 	scalar = 3.0;
     
@@ -301,7 +302,7 @@ int main(int argc, char* argv[]) {
 	#endif
 
     /* --- Check Results --- */
-    checkSTREAMresults(a,b,c,STREAM_ARRAY_SIZE);
+    checkSTREAMresults(a,b,c,lo,hi);
     printf(HLINE);
 	printf("Returning ret %f\n",ret);
 
@@ -315,7 +316,7 @@ int main(int argc, char* argv[]) {
 void checkSTREAMresults(STREAM_TYPE *a, \
                         STREAM_TYPE *b, \
 						STREAM_TYPE *c, \
-						unsigned num_elements) {
+						unsigned lo, unsigned hi) {
 	STREAM_TYPE aj,bj,cj,scalar;
 	STREAM_TYPE aSumErr,bSumErr,cSumErr;
 	STREAM_TYPE aAvgErr,bAvgErr,cAvgErr;
@@ -329,30 +330,36 @@ void checkSTREAMresults(STREAM_TYPE *a, \
 	cj = 0.0;
     
 	/* a[] is modified during timing check */
-	aj = 2.0E0 * aj;
+	// aj = 2.0E0 * aj;
     
 	/* now execute timing loop */
 	scalar = 3.0;
 	for (k=0; k<NTIMES; k++) {
+		#if BENCH_CLASS == 0
+		#elif BENCH_CLASS == 1
         cj = aj;
+		#elif BENCH_CLASS == 2
         bj = scalar*cj;
+		#elif BENCH_CLASS == 3
         cj = aj+bj;
+		#else
         aj = bj+scalar*cj;
+		#endif
     }
 
     /* accumulate deltas between observed and expected results */
 	aSumErr = 0.0;
 	bSumErr = 0.0;
 	cSumErr = 0.0;
-	for (j=0; j<STREAM_ARRAY_SIZE; j++) {
+	for (j=lo; j<hi; j++) {
 		aSumErr += abs(a[j] - aj);
 		bSumErr += abs(b[j] - bj);
 		cSumErr += abs(c[j] - cj);
 		// if (j == 417) printf("Index 417: c[j]: %f, cj: %f\n",c[j],cj);	// MCCALPIN
 	}
-	aAvgErr = aSumErr / (STREAM_TYPE) STREAM_ARRAY_SIZE;
-	bAvgErr = bSumErr / (STREAM_TYPE) STREAM_ARRAY_SIZE;
-	cAvgErr = cSumErr / (STREAM_TYPE) STREAM_ARRAY_SIZE;
+	aAvgErr = aSumErr / ((STREAM_TYPE) (hi-lo));
+	bAvgErr = bSumErr / ((STREAM_TYPE) (hi-lo));
+	cAvgErr = cSumErr / ((STREAM_TYPE) (hi-lo));
 
 	if (sizeof(STREAM_TYPE) == 4) {
 		epsilon = 1.e-6;
