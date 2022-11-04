@@ -205,10 +205,10 @@ STREAM_TYPE stream_compute_roi(STREAM_TYPE *a,\
                                STREAM_TYPE *b,\ 
 						       STREAM_TYPE *c, \
 						       STREAM_TYPE scalar, \
-							   unsigned lo, unsigned hi) {
+							   unsigned lo, unsigned hi, unsigned num_iters) {
 	unsigned k, j;
 	STREAM_TYPE ret = 0.0;
-	for (k=0; k<NTIMES; k++) {
+	for (k=0; k<num_iters; k++) {
 		for (j=lo; j<hi; j++) {
 			#if BENCH_CLASS == 0
 			ret += a[j];
@@ -240,12 +240,13 @@ int main(int argc, char* argv[]) {
     fprintf(stderr,"This system uses %d bytes per array element.\n",
 	bytesPerWord);
     fprintf(stderr,HLINE);
-	if (argc != 3) {
-      fprintf(stderr, "\n[Usage]-%d: exe <proc_id> <num_procs>\n",argc);
+	if (argc < 4) {
+      fprintf(stderr, "\n[Usage]-%d: exe <proc_id> <num_procs> <num_iters>\n",argc);
       return 1;
    	}
 	unsigned proc_id = atoi(argv[1]);
 	unsigned num_procs = atoi(argv[2]);
+	unsigned num_iters = atoi(argv[3]);
 
 
 #ifdef N
@@ -263,7 +264,7 @@ int main(int argc, char* argv[]) {
     fprintf(stderr,"Total memory required = %.1f MiB (= %.1f GiB).\n",
 	(3.0 * bytesPerWord) * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024.),
 	(3.0 * bytesPerWord) * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024./1024.));
-    fprintf(stderr,"Each kernel will be executed %d times.\n", NTIMES);
+    fprintf(stderr,"Each kernel will be executed %d times.\n", num_iters);
     fprintf(stderr,"The *best* time for each kernel (excluding the first iteration)\n"); 
     fprintf(stderr,"will be used to compute the reported bandwidth.\n");
 
@@ -281,17 +282,17 @@ int main(int argc, char* argv[]) {
 	unsigned lo = proc_id*num_elements_per_proc;
 	unsigned hi = (proc_id+1)*(num_elements_per_proc);
 	
-    /*	--- ROI --- repeat test cases NTIMES times --- */
-	#ifdef GEM5_RV64
-	m5_reset_stats(0,0);
+    /*	--- ROI --- repeat test cases num_iters times --- */
+	#if GEM5_RV64
+	// m5_reset_stats(0,0);
 	#else
 	uint64_t start = __eco_rdtsc(); // CRITICAL SECTION : START
 	#endif
 	
-	volatile STREAM_TYPE ret = stream_compute_roi(a, b, c, scalar, lo, hi);
+	volatile STREAM_TYPE ret = stream_compute_roi(a, b, c, scalar, lo, hi, num_iters);
 
 	#if GEM5_RV64
-    m5_dump_stats(0,0);
+    // m5_dump_stats(0,0);
 	#else
 	uint64_t stop = __eco_rdtsc(); // CRITICAL SECTION : STOP
     #endif
